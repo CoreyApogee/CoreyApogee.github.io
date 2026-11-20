@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'">
+<title>Sign release</title>
+<style>
+:root { --bg:#fff; --fg:#111; --mut:#555; --ok:#0a6b2b; --bad:#a40000; --btn:#0b57d0; }
+@media (prefers-color-scheme: dark) { :root { --bg:#111; --fg:#eee; --mut:#aaa; --ok:#5fd38a; --bad:#ff7b7b; --btn:#7fb0ff; } }
+body { background:var(--bg); color:var(--fg); font:18px/1.45 system-ui, sans-serif; margin:0; padding:16px; }
+h1 { font-size:22px; margin:0 0 12px; }
+.k { color:var(--mut); font-size:14px; } .v { font-family:monospace; word-break:break-all; margin-bottom:10px; }
+button { font-size:20px; width:100%; padding:16px; margin:10px 0; border:0; border-radius:12px; background:var(--btn); color:var(--bg); }
+button[disabled] { opacity:.4; } #msg { margin-top:12px; } .ok { color:var(--ok); } .bad { color:var(--bad); }
+textarea { width:100%; height:6em; font-size:12px; }
+</style>
+</head>
+<body>
+<h1 id="h">Sign release</h1>
+<div class="k">Release</div><div class="v" id="rel">-</div>
+<div class="k">Commit</div><div class="v" id="sha">-</div>
+<div class="k">What it does</div><div class="v" id="title">-</div>
+<div class="k">Good until</div><div class="v" id="exp">-</div>
+<button id="go" disabled>Sign with fingerprint</button>
+<button id="send" hidden>Send to the bot</button>
+<div id="msg"></div>
+<textarea id="out" hidden readonly></textarea>
+<script id="lib">
+/* Pure helpers (also run by the offline harness under node). The page holds no secret and no authority: the Dell's
+   admin verifier recomputes the challenge from its own files; whatever this page shows, only a tap over the exact
+   challenge the Dell asked for is accepted. */
+var COS = (function () {
+  function b64uToBytes(s) {
+    if (!/^[A-Za-z0-9_-]*$/.test(s)) throw new Error("bad base64url");
+    s = s.replace(/-/g, "+").replace(/_/g, "/"); while (s.length % 4) s += "=";
+    var bin = atob(s), u = new Uint8Array(bin.length);
+    for (var i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i);
+    return u;
+  }
+  function bytesToB64u(buf) {
+    var u = new Uint8Array(buf), s = "";
+    for (var i = 0; i < u.length; i++) s += String.fromCharCode(u[i]);
+    return btoa(s).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  }
+  /* Fragment: #v1.<b64u(JSON {rel,sha,title,expires,nonce,rpId,challenge,cred})> (never sent to any server). */
+  function parseFragment(frag) {
+    var m = /^#v1\.([A-Za-z0-9_-]{20,3000})$/.exec(frag || "");
+    if (!m) throw new Error("this link is not a sign link");
+    var o = JSON.parse(new TextDecoder().decode(b64uToBytes(m[1])));
+    var hex40 = /^[0-9a-f]{40}$/, hex32 = /^[0-9a-f]{32}$/, b = /^[A-Za-z0-9_-]{16,700}$/;
+    if (!/^7\.[0-9]{1,2}(\.[0-9]{1,2})?$/.test(o.rel) || !hex40.test(o.sha) || !hex32.test(o.nonce)
+        || typeof o.expires !== "number" || !/^[A-Za-z0-9.-]{3,253}$/.test(o.rpId)
+        || !/^[A-Za-z0-9_-]{43}$/.test(o.challenge) || !b.test(o.cred) || typeof o.title !== "string")
+      throw new Error("this sign link has a bad value");
+    return o;
+  }
+  function getOptions(o) {
+    return { publicKey: { challenge: b64uToBytes(o.challenge), rpId: o.rpId, timeout: 120000,
+      userVerification: "required", allowCredentials: [{ type: "public-key", id: b64uToBytes(o.cred) }] } };
+  }
+  /* The tap as py_webauthn reads it (the browser's toJSON() shape). */
+  function assertionJSON(c) {
+    var r = c.response;
+    return { id: c.id, rawId: bytesToB64u(c.rawId), type: c.type,
+      response: { clientDataJSON: bytesToB64u(r.clientDataJSON), authenticatorData: bytesToB64u(r.authenticatorData),
+        signature: bytesToB64u(r.signature), userHandle: r.userHandle ? bytesToB64u(r.userHandle) : null } };
+  }
+  /* One Telegram message to the bot: COSSIGN v1 <nonce> <b64u(JSON)>. Under 4096 characters. */
+  function message(nonce, c) {
+    var m = "COSSIGN v1 " + nonce + " " + bytesToB64u(new TextEncoder().encode(JSON.stringify(assertionJSON(c))));
+    if (m.length > 3900) throw new Error("the tap is too long for one message");
+    return m;
+  }
+  return { b64uToBytes: b64uToBytes, bytesToB64u: bytesToB64u, parseFragment: parseFragment,
+           getOptions: getOptions, assertionJSON: assertionJSON, message: message };
+})();
+if (typeof module !== "undefined") module.exports = COS;
+</script>
+<script>
+(function () {
+  if (typeof document === "undefined") return;
+  var $ = function (id) { return document.getElementById(id); };
+  function say(t, cls) { $("msg").textContent = t; $("msg").className = cls || ""; }
+  var o;
+  try { o = COS.parseFragment(location.hash); } catch (e) { say(e.message, "bad"); return; }
+  $("h").textContent = "Sign release " + o.rel;
+  $("rel").textContent = o.rel; $("sha").textContent = o.sha; $("title").textContent = o.title || "-";
+  $("exp").textContent = new Date(o.expires * 1000).toLocaleString();
+  if (!window.PublicKeyCredential) { say("This browser cannot use passkeys. Open the link in Chrome.", "bad"); return; }
+  if (Date.now() / 1000 > o.expires) { say("This sign link has expired. Nothing was signed.", "bad"); return; }
+  $("go").disabled = false;
+  $("go").onclick = function () {
+    $("go").disabled = true; say("Waiting for your fingerprint...");
+    navigator.credentials.get(COS.getOptions(o)).then(function (c) {
+      var m = COS.message(o.nonce, c);
+      $("out").value = m; $("out").hidden = false; $("send").hidden = false;
+      say("Fingerprint done. Now tap Send to the bot, pick the bot, and send. Signing happens on the Dell.", "ok");
+      $("send").onclick = function () {
+        location.href = "https://t.me/share/url?url=" + encodeURIComponent(m);
+      };
+    }).catch(function (e) { $("go").disabled = false; say("Not signed: " + (e && e.name || "error") + ". Nothing was signed.", "bad"); });
+  };
+})();
+</script>
+</body>
+</html>

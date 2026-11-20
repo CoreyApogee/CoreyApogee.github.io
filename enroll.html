@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'">
+<title>Enroll signing key</title>
+<style>
+:root { --bg:#fff; --fg:#111; --mut:#555; --ok:#0a6b2b; --bad:#a40000; --btn:#0b57d0; }
+@media (prefers-color-scheme: dark) { :root { --bg:#111; --fg:#eee; --mut:#aaa; --ok:#5fd38a; --bad:#ff7b7b; --btn:#7fb0ff; } }
+body { background:var(--bg); color:var(--fg); font:18px/1.45 system-ui, sans-serif; margin:0; padding:16px; }
+h1 { font-size:22px; margin:0 0 12px; } .v { font-family:monospace; word-break:break-all; }
+button { font-size:20px; width:100%; padding:16px; margin:10px 0; border:0; border-radius:12px; background:var(--btn); color:var(--bg); }
+button[disabled] { opacity:.4; } .ok { color:var(--ok); } .bad { color:var(--bad); }
+</style>
+</head>
+<body>
+<h1>Make your release-signing key</h1>
+<p>Only do this standing at the Dell, with its enrollment window open. Code on the Dell screen: <span class="v" id="code">-</span></p>
+<button id="go" disabled>Make key with fingerprint</button>
+<p>Key check (the Dell window shows the same 5 groups): <span class="v" id="fp">-</span></p>
+<button id="send" hidden>Send to the bot</button>
+<div id="msg"></div>
+<script id="lib">
+var COSE = (function () {
+  function b64uToBytes(s) {
+    if (!/^[A-Za-z0-9_-]*$/.test(s)) throw new Error("bad base64url");
+    s = s.replace(/-/g, "+").replace(/_/g, "/"); while (s.length % 4) s += "=";
+    var bin = atob(s), u = new Uint8Array(bin.length);
+    for (var i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i);
+    return u;
+  }
+  function bytesToB64u(buf) {
+    var u = new Uint8Array(buf), s = "";
+    for (var i = 0; i < u.length; i++) s += String.fromCharCode(u[i]);
+    return btoa(s).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  }
+  /* Fragment: #v1.<b64u(JSON {rpId, challenge, code})>; code = 8 digits the admin window shows. */
+  function parseFragment(frag) {
+    var m = /^#v1\.([A-Za-z0-9_-]{20,1000})$/.exec(frag || "");
+    if (!m) throw new Error("this link is not an enrollment link");
+    var o = JSON.parse(new TextDecoder().decode(b64uToBytes(m[1])));
+    if (!/^[A-Za-z0-9.-]{3,253}$/.test(o.rpId) || !/^[A-Za-z0-9_-]{43}$/.test(o.challenge) || !/^[0-9]{8}$/.test(o.code))
+      throw new Error("this enrollment link has a bad value");
+    return o;
+  }
+  function createOptions(o) {
+    return { publicKey: { challenge: b64uToBytes(o.challenge), rp: { id: o.rpId, name: "Release signing" },
+      user: { id: new TextEncoder().encode("corey-release-signer"), name: "Release signing", displayName: "Release signing" },
+      pubKeyCredParams: [{ type: "public-key", alg: -7 }], timeout: 300000, attestation: "none",
+      authenticatorSelection: { residentKey: "required", userVerification: "required" } } };
+  }
+  function registrationJSON(c) {
+    return { id: c.id, rawId: bytesToB64u(c.rawId), type: c.type,
+      response: { clientDataJSON: bytesToB64u(c.response.clientDataJSON),
+                  attestationObject: bytesToB64u(c.response.attestationObject) } };
+  }
+  function message(code, c) {
+    var m = "COSENROLL v1 " + code + " " + bytesToB64u(new TextEncoder().encode(JSON.stringify(registrationJSON(c))));
+    if (m.length > 3900) throw new Error("the key is too long for one message");
+    return m;
+  }
+  /* The fingerprint Corey compares with the Dell window: sha256 of the new key's SubjectPublicKeyInfo
+     (response.getPublicKey()), first 20 hex in 5 groups; the Dell computes the same from the key it receives. */
+  function fingerprint(spki, subtle) {
+    return subtle.digest("SHA-256", spki).then(function (d) {
+      var u = new Uint8Array(d), h = "";
+      for (var i = 0; i < 10; i++) h += (u[i] < 16 ? "0" : "") + u[i].toString(16);
+      return h.match(/.{4}/g).join(" ");
+    });
+  }
+  return { parseFragment: parseFragment, createOptions: createOptions, registrationJSON: registrationJSON,
+           message: message, fingerprint: fingerprint, bytesToB64u: bytesToB64u, b64uToBytes: b64uToBytes };
+})();
+if (typeof module !== "undefined") module.exports = COSE;
+</script>
+<script>
+(function () {
+  if (typeof document === "undefined") return;
+  var $ = function (id) { return document.getElementById(id); };
+  function say(t, cls) { $("msg").textContent = t; $("msg").className = cls || ""; }
+  var o;
+  try { o = COSE.parseFragment(location.hash); } catch (e) { say(e.message, "bad"); return; }
+  $("code").textContent = o.code;
+  if (!window.PublicKeyCredential) { say("This browser cannot make passkeys. Open the link in Chrome.", "bad"); return; }
+  $("go").disabled = false;
+  $("go").onclick = function () {
+    $("go").disabled = true; say("Waiting for your fingerprint...");
+    var m;
+    navigator.credentials.create(COSE.createOptions(o)).then(function (c) {
+      m = COSE.message(o.code, c);
+      return COSE.fingerprint(c.response.getPublicKey(), crypto.subtle);
+    }).then(function (fp) {
+      $("fp").textContent = fp;
+      $("send").hidden = false;
+      say("Key made. Keep this screen: the Dell window will show the same key check. Tap Send to the bot, pick the bot, send.", "ok");
+      $("send").onclick = function () { location.href = "https://t.me/share/url?url=" + encodeURIComponent(m); };
+    }).catch(function (e) { $("go").disabled = false; say("No key made: " + (e && e.name || "error"), "bad"); });
+  };
+})();
+</script>
+</body>
+</html>
