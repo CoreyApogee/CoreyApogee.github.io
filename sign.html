@@ -13,7 +13,7 @@ body { background:var(--bg); color:var(--fg); font:18px/1.45 system-ui, sans-ser
 h1 { font-size:22px; margin:0 0 12px; }
 .k { color:var(--mut); font-size:14px; } .v { font-family:monospace; word-break:break-all; margin-bottom:10px; }
 button { font-size:20px; width:100%; padding:16px; margin:10px 0; border:0; border-radius:12px; background:var(--btn); color:var(--bg); }
-button[disabled] { opacity:.4; } #msg { margin-top:12px; } .ok { color:var(--ok); } .bad { color:var(--bad); }
+button[disabled] { opacity:.4; } button.alt { font-size:16px; padding:10px; background:var(--mut); } #msg { margin-top:12px; } .ok { color:var(--ok); } .bad { color:var(--bad); }
 textarea { width:100%; height:6em; font-size:12px; }
 </style>
 </head>
@@ -25,6 +25,7 @@ textarea { width:100%; height:6em; font-size:12px; }
 <div class="k">Good until</div><div class="v" id="exp">-</div>
 <button id="go" disabled>Sign with fingerprint</button>
 <button id="send" hidden>Send to the bot</button>
+<button id="share" class="alt" hidden>Other way: share it to the bot</button>
 <div id="msg"></div>
 <textarea id="out" hidden readonly></textarea>
 <script id="lib">
@@ -115,7 +116,10 @@ var COS = (function () {
     if (m.length > 3900) throw new Error("the tap is too long for one message");
     return m;
   }
-  return { b64uToBytes: b64uToBytes, bytesToB64u: bytesToB64u, parseFragment: parseFragment, ready: ready,
+  /* His bot's chat with the message filled in: t.me/<username>?text=<draft> (Telegram's public username link). */
+  var BOT = "cos_brains_corey_bot";
+  function botLink(m) { return "https://t.me/" + BOT + "?text=" + encodeURIComponent(m); }
+  return { botLink: botLink, b64uToBytes: b64uToBytes, bytesToB64u: bytesToB64u, parseFragment: parseFragment, ready: ready,
            shortFp: shortFp, getOptions: getOptions, assertionJSON: assertionJSON, message: message };
 })();
 if (typeof module !== "undefined") module.exports = COS;
@@ -151,9 +155,16 @@ if (typeof module !== "undefined") module.exports = COS;
     navigator.credentials.get(COS.getOptions(o)).then(function (c) {
       var m = COS.message(o.nonce, c);
       $("out").value = m; $("out").hidden = false; $("send").hidden = false;
-      say("Fingerprint done. Now tap Send to the bot, pick the bot, and send. " +
-          (inst ? "The install runs on the Dell." : "Signing happens on the Dell."), "ok");
-      $("send").onclick = function () {
+      $("share").hidden = false;
+      say("Fingerprint done. NOT SENT YET. Tap Send to the bot: Telegram opens the bot's chat with the message "
+          + "filled in; tap Telegram's send arrow. The bot answers Recorded within a minute. No answer means it did "
+          + "not arrive: come back here and send again. " + (inst ? "The install runs on the Dell." : "Signing happens on the Dell."), "ok");
+      $("send").onclick = function () {                 /* the bot's own chat, text filled in (core.telegram.org/api/links) */
+        say("Opened Telegram. Still not sent until you tap its send arrow; then wait for the bot's Recorded.", "ok");
+        location.href = COS.botLink(m);
+      };
+      $("share").onclick = function () {                /* fallback: Telegram's share sheet; pick the cos brains bot */
+        say("In the share list pick the cos brains bot, then send. Wait for the bot's Recorded.", "ok");
         location.href = "https://t.me/share/url?url=" + encodeURIComponent(m);
       };
     }).catch(function (e) { $("go").disabled = false; say("Not signed: " + (e && e.name || "error") + ". Nothing was signed.", "bad"); });
