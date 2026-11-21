@@ -19,8 +19,8 @@ textarea { width:100%; height:6em; font-size:12px; }
 </head>
 <body>
 <h1 id="h">Sign release</h1>
-<div class="k">Release</div><div class="v" id="rel">-</div>
-<div class="k">Commit</div><div class="v" id="sha">-</div>
+<div class="k" id="k1">Release</div><div class="v" id="rel">-</div>
+<div class="k" id="k2">Commit</div><div class="v" id="sha">-</div>
 <div class="k">What it does</div><div class="v" id="title">-</div>
 <div class="k">Good until</div><div class="v" id="exp">-</div>
 <button id="go" disabled>Sign with fingerprint</button>
@@ -44,18 +44,60 @@ var COS = (function () {
     for (var i = 0; i < u.length; i++) s += String.fromCharCode(u[i]);
     return btoa(s).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
   }
-  /* Fragment: #v1.<b64u(JSON {rel,sha,title,expires,nonce,rpId,challenge,cred})> (never sent to any server). */
+  /* Fragment: #v1.<b64u(JSON {rel,sha,pack,wf,proof,installed,title,expires,nonce,rpId,challenge,cred})> (never sent
+     to any server).
+     Install links add kind "install": {kind,name,bundle,what,nonce,expires,rpId,challenge,cred}. */
   function parseFragment(frag) {
-    var m = /^#v1\.([A-Za-z0-9_-]{20,3000})$/.exec(frag || "");
+    var m = /^#v1\.([A-Za-z0-9_-]{20,6000})$/.exec(frag || "");
     if (!m) throw new Error("this link is not a sign link");
     var o = JSON.parse(new TextDecoder().decode(b64uToBytes(m[1])));
     var hex40 = /^[0-9a-f]{40}$/, hex32 = /^[0-9a-f]{32}$/, b = /^[A-Za-z0-9_-]{16,700}$/;
+    if (o === null || typeof o !== "object") throw new Error("this sign link has a bad value");
+    if ("kind" in o) {
+      if (o.kind !== "install" || !/^[a-z0-9][a-z0-9-]{0,39}$/.test(o.name) || !/^[0-9a-f]{64}$/.test(o.bundle)
+          || typeof o.what !== "string" || !/^[\x20-\x7e\n]{1,900}$/.test(o.what) || !/\S/.test(o.what)
+          || !hex32.test(o.nonce) || !Number.isInteger(o.expires) || !/^[A-Za-z0-9.-]{3,253}$/.test(o.rpId)
+          || !/^[A-Za-z0-9_-]{43}$/.test(o.challenge) || !b.test(o.cred))
+        throw new Error("this install link has a bad value");
+      return o;
+    }
+    if (m[1].length > 3000) throw new Error("this link is not a sign link");   /* releases: as before */
     if (!/^7\.[0-9]{1,2}(\.[0-9]{1,2})?$/.test(o.rel) || !hex40.test(o.sha) || !hex32.test(o.nonce)
-        || typeof o.expires !== "number" || !/^[A-Za-z0-9.-]{3,253}$/.test(o.rpId)
+        || !hex40.test(o.pack) || !hex40.test(o.wf) || !/^[0-9a-f]{64}$/.test(o.proof) || !hex40.test(o.installed)
+        || !Number.isInteger(o.expires) || !/^[A-Za-z0-9.-]{3,253}$/.test(o.rpId)
         || !/^[A-Za-z0-9_-]{43}$/.test(o.challenge) || !b.test(o.cred) || typeof o.title !== "string")
       throw new Error("this sign link has a bad value");
     return o;
   }
+  function hex(buf) {
+    var u = new Uint8Array(buf), s = "";
+    for (var i = 0; i < u.length; i++) s += (u[i] < 16 ? "0" : "") + u[i].toString(16);
+    return s;
+  }
+  /* What he reads is what he signs: for an install link the page itself recomputes the challenge from exactly the
+     fields it shows (sha256("cos-install-v1|NAME|BUNDLE|sha256(WHAT)|NONCE|EXPIRES"), the Dell's formula) and refuses
+     the link if it is not the challenge the link asks the passkey to sign. Release links the same (Nov 21 2026):
+     sha256("cos-sign-v1|REL|SHA|PACK|WF|PROOF|INSTALLED|NONCE|EXPIRES"); a link without those fields is refused. */
+  function ready(o, subtle) {
+    if (!subtle) return Promise.reject(new Error("this browser cannot check the link; open it in Chrome"));
+    var te = new TextEncoder();
+    if (o.kind !== "install") {
+      var rs = ["cos-sign-v1", o.rel, o.sha, o.pack, o.wf, o.proof, o.installed, o.nonce, String(o.expires)].join("|");
+      return subtle.digest("SHA-256", te.encode(rs)).then(function (c) {
+        if (bytesToB64u(c) !== o.challenge) throw new Error("this link does not match what it shows; nothing was signed");
+        return o;
+      });
+    }
+    return subtle.digest("SHA-256", te.encode(o.what)).then(function (w) {
+      var s = ["cos-install-v1", o.name, o.bundle, hex(w), o.nonce, String(o.expires)].join("|");
+      return subtle.digest("SHA-256", te.encode(s));
+    }).then(function (c) {
+      if (bytesToB64u(c) !== o.challenge) throw new Error("this link does not match what it shows; nothing was approved");
+      return o;
+    });
+  }
+  /* the short bundle fingerprint he can compare with the Dell's lines: first 12 hex in groups of 4 */
+  function shortFp(h) { return h.slice(0, 4) + " " + h.slice(4, 8) + " " + h.slice(8, 12); }
   function getOptions(o) {
     return { publicKey: { challenge: b64uToBytes(o.challenge), rpId: o.rpId, timeout: 120000,
       userVerification: "required", allowCredentials: [{ type: "public-key", id: b64uToBytes(o.cred) }] } };
@@ -73,8 +115,8 @@ var COS = (function () {
     if (m.length > 3900) throw new Error("the tap is too long for one message");
     return m;
   }
-  return { b64uToBytes: b64uToBytes, bytesToB64u: bytesToB64u, parseFragment: parseFragment,
-           getOptions: getOptions, assertionJSON: assertionJSON, message: message };
+  return { b64uToBytes: b64uToBytes, bytesToB64u: bytesToB64u, parseFragment: parseFragment, ready: ready,
+           shortFp: shortFp, getOptions: getOptions, assertionJSON: assertionJSON, message: message };
 })();
 if (typeof module !== "undefined") module.exports = COS;
 </script>
@@ -85,18 +127,32 @@ if (typeof module !== "undefined") module.exports = COS;
   function say(t, cls) { $("msg").textContent = t; $("msg").className = cls || ""; }
   var o;
   try { o = COS.parseFragment(location.hash); } catch (e) { say(e.message, "bad"); return; }
-  $("h").textContent = "Sign release " + o.rel;
-  $("rel").textContent = o.rel; $("sha").textContent = o.sha; $("title").textContent = o.title || "-";
+  var inst = o.kind === "install";
+  if (inst) {                         /* an install: its name, the bundle's fingerprint and the whole WHAT list */
+    document.title = "Approve install";
+    $("h").textContent = "Approve install " + o.name;
+    $("k1").textContent = "Install"; $("rel").textContent = o.name;
+    $("k2").textContent = "Bundle fingerprint"; $("sha").textContent = COS.shortFp(o.bundle);
+    $("title").textContent = o.what; $("title").style.whiteSpace = "pre-wrap";
+    $("title").style.fontFamily = "inherit"; $("title").style.wordBreak = "normal";
+    $("go").textContent = "Approve with fingerprint";
+  } else {
+    $("h").textContent = "Sign release " + o.rel;
+    $("rel").textContent = o.rel; $("sha").textContent = o.sha;
+    $("title").textContent = "review pack " + o.pack.slice(0, 12);     /* signed too; the link's free title is not */
+  }
   $("exp").textContent = new Date(o.expires * 1000).toLocaleString();
   if (!window.PublicKeyCredential) { say("This browser cannot use passkeys. Open the link in Chrome.", "bad"); return; }
   if (Date.now() / 1000 > o.expires) { say("This sign link has expired. Nothing was signed.", "bad"); return; }
-  $("go").disabled = false;
+  COS.ready(o, window.crypto && window.crypto.subtle).then(function () { $("go").disabled = false; },
+    function (e) { say(e.message, "bad"); });
   $("go").onclick = function () {
     $("go").disabled = true; say("Waiting for your fingerprint...");
     navigator.credentials.get(COS.getOptions(o)).then(function (c) {
       var m = COS.message(o.nonce, c);
       $("out").value = m; $("out").hidden = false; $("send").hidden = false;
-      say("Fingerprint done. Now tap Send to the bot, pick the bot, and send. Signing happens on the Dell.", "ok");
+      say("Fingerprint done. Now tap Send to the bot, pick the bot, and send. " +
+          (inst ? "The install runs on the Dell." : "Signing happens on the Dell."), "ok");
       $("send").onclick = function () {
         location.href = "https://t.me/share/url?url=" + encodeURIComponent(m);
       };
