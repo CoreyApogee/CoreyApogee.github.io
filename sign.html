@@ -25,7 +25,8 @@ textarea { width:100%; height:6em; font-size:12px; }
 <div class="k">Good until</div><div class="v" id="exp">-</div>
 <button id="go" disabled>Sign with fingerprint</button>
 <button id="send" hidden>Send to the bot</button>
-<button id="share" class="alt" hidden>Other way: share it to the bot</button>
+<button id="copy" class="alt" hidden>Copy the message</button>
+<button id="share" class="alt" hidden>Other way: pick the bot from Telegram's list</button>
 <div id="msg"></div>
 <textarea id="out" hidden readonly></textarea>
 <script id="lib">
@@ -116,11 +117,15 @@ var COS = (function () {
     if (m.length > 3900) throw new Error("the tap is too long for one message");
     return m;
   }
-  /* His bot's chat with the message filled in: t.me/<username>?text=<draft> (Telegram's public username link). */
+  /* His bot's chat with the message filled in: tg://resolve?domain=<username>&text=<draft> (core.telegram.org/api/links).
+     Not https://t.me/...: Telegram for Android does not verify-claim t.me (no autoVerify in its manifest), so on Android
+     12+ Chrome shows the t.me web page instead of the app. The tg: scheme always goes straight to the app. */
   var BOT = "cos_brains_corey_bot";
-  function botLink(m) { return "https://t.me/" + BOT + "?text=" + encodeURIComponent(m); }
-  return { botLink: botLink, b64uToBytes: b64uToBytes, bytesToB64u: bytesToB64u, parseFragment: parseFragment, ready: ready,
-           shortFp: shortFp, getOptions: getOptions, assertionJSON: assertionJSON, message: message };
+  function botLink(m) { return "tg://resolve?domain=" + BOT + "&text=" + encodeURIComponent(m); }
+  function shareLink(m) { return "tg://msg_url?url=" + encodeURIComponent(m); }
+  return { botLink: botLink, shareLink: shareLink, b64uToBytes: b64uToBytes, bytesToB64u: bytesToB64u,
+           parseFragment: parseFragment, ready: ready, shortFp: shortFp, getOptions: getOptions,
+           assertionJSON: assertionJSON, message: message };
 })();
 if (typeof module !== "undefined") module.exports = COS;
 </script>
@@ -155,17 +160,30 @@ if (typeof module !== "undefined") module.exports = COS;
     navigator.credentials.get(COS.getOptions(o)).then(function (c) {
       var m = COS.message(o.nonce, c);
       $("out").value = m; $("out").hidden = false; $("send").hidden = false;
-      $("share").hidden = false;
-      say("Fingerprint done. NOT SENT YET. Tap Send to the bot: Telegram opens the bot's chat with the message "
-          + "filled in; tap Telegram's send arrow. The bot answers Recorded within a minute. No answer means it did "
-          + "not arrive: come back here and send again. " + (inst ? "The install runs on the Dell." : "Signing happens on the Dell."), "ok");
-      $("send").onclick = function () {                 /* the bot's own chat, text filled in (core.telegram.org/api/links) */
-        say("Opened Telegram. Still not sent until you tap its send arrow; then wait for the bot's Recorded.", "ok");
+      $("copy").hidden = false; $("share").hidden = false;
+      say("Fingerprint done. NOT SENT YET. Tap Send to the bot: Telegram opens the cos brains chat with the message "
+          + "in the box, and it is copied too. Tap Telegram's send arrow. The bot answers within a minute. No answer "
+          + "means it did not arrive. " + (inst ? "The install runs on the Dell." : "Signing happens on the Dell."), "ok");
+      function copy() {                                 /* on his clipboard too: if Telegram leaves the box empty, he pastes */
+        var ok = false;
+        try { $("out").focus(); $("out").select(); ok = document.execCommand("copy"); $("out").blur(); } catch (e) {}
+        if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(m).catch(function () {});
+        return ok;
+      }
+      $("send").onclick = function () {                 /* the bot's own chat, text filled in */
+        copy();
+        say("Opening Telegram. NOT SENT until you tap its send arrow. If the box there is empty: press and hold it, "
+            + "tap Paste, then send. Then wait for the bot's answer.", "ok");
         location.href = COS.botLink(m);
       };
-      $("share").onclick = function () {                /* fallback: Telegram's share sheet; pick the cos brains bot */
-        say("In the share list pick the cos brains bot, then send. Wait for the bot's Recorded.", "ok");
-        location.href = "https://t.me/share/url?url=" + encodeURIComponent(m);
+      $("copy").onclick = function () {
+        say(copy() ? "Copied. Open the cos brains chat in Telegram, press and hold the box, tap Paste, then send."
+                   : "Copy did not work here: press and hold the text below, Select all, Copy, then paste it in the cos brains chat.", "ok");
+      };
+      $("share").onclick = function () {                /* fallback: Telegram's chat list; pick the cos brains bot */
+        copy();
+        say("In Telegram's list pick the cos brains bot, then send. Wait for the bot's answer.", "ok");
+        location.href = COS.shareLink(m);
       };
     }).catch(function (e) { $("go").disabled = false; say("Not signed: " + (e && e.name || "error") + ". Nothing was signed.", "bad"); });
   };
