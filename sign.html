@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="referrer" content="no-referrer">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'unsafe-inline'; connect-src https://ntfy.sh; base-uri 'none'; form-action 'none'">
 <title>Sign release</title>
 <style>
 :root { --bg:#fff; --fg:#111; --mut:#555; --ok:#0a6b2b; --bad:#a40000; --btn:#0b57d0; }
@@ -13,7 +13,7 @@ body { background:var(--bg); color:var(--fg); font:18px/1.45 system-ui, sans-ser
 h1 { font-size:22px; margin:0 0 12px; }
 .k { color:var(--mut); font-size:14px; } .v { font-family:monospace; word-break:break-all; margin-bottom:10px; }
 button { font-size:20px; width:100%; padding:16px; margin:10px 0; border:0; border-radius:12px; background:var(--btn); color:var(--bg); }
-button[disabled] { opacity:.4; } button.alt { font-size:16px; padding:10px; background:var(--mut); } #msg { margin-top:12px; } .ok { color:var(--ok); } .bad { color:var(--bad); }
+button[disabled] { opacity:.4; } button.alt { font-size:16px; padding:10px; background:var(--mut); } #msg { margin-top:12px; white-space:pre-line; } .ok { color:var(--ok); } .bad { color:var(--bad); }
 textarea { width:100%; height:6em; font-size:12px; }
 </style>
 </head>
@@ -24,10 +24,12 @@ textarea { width:100%; height:6em; font-size:12px; }
 <div class="k">What it does</div><div class="v" id="title">-</div>
 <div class="k">Good until</div><div class="v" id="exp">-</div>
 <button id="go" disabled>Sign with fingerprint</button>
+<div id="msg"></div>
+<button id="retry" hidden>Try again</button>
+<button id="other" class="alt" hidden>Other way: send it through Telegram</button>
 <button id="send" hidden>Send to the bot</button>
 <button id="copy" class="alt" hidden>Copy the message</button>
 <button id="share" class="alt" hidden>Other way: pick the bot from Telegram's list</button>
-<div id="msg"></div>
 <textarea id="out" hidden readonly></textarea>
 <script id="lib">
 /* Pure helpers (also run by the offline harness under node). The page holds no secret and no authority: the Dell's
@@ -55,6 +57,7 @@ var COS = (function () {
     var o = JSON.parse(new TextDecoder().decode(b64uToBytes(m[1])));
     var hex40 = /^[0-9a-f]{40}$/, hex32 = /^[0-9a-f]{32}$/, b = /^[A-Za-z0-9_-]{16,700}$/;
     if (o === null || typeof o !== "object") throw new Error("this sign link has a bad value");
+    if ("rk" in o && !/^[A-Za-z0-9_-]{43}$/.test(o.rk)) throw new Error("this sign link has a bad value");
     if ("kind" in o) {
       if (o.kind !== "install" || !/^[a-z0-9][a-z0-9-]{0,39}$/.test(o.name) || !/^[0-9a-f]{64}$/.test(o.bundle)
           || typeof o.what !== "string" || !/^[\x20-\x7e\n]{1,900}$/.test(o.what) || !/\S/.test(o.what)
@@ -123,7 +126,38 @@ var COS = (function () {
   var BOT = "cos_brains_corey_bot";
   function botLink(m) { return "tg://resolve?domain=" + BOT + "&text=" + encodeURIComponent(m); }
   function shareLink(m) { return "tg://msg_url?url=" + encodeURIComponent(m); }
-  return { botLink: botLink, shareLink: shareLink, b64uToBytes: b64uToBytes, bytesToB64u: bytesToB64u,
+  /* The relay (Nov 21 2026): the tap goes straight to the Dell, no Telegram step. The page posts the same one-line tap
+     to this public ntfy.sh topic; the Dell's phone-relay.py takes only taps for open cards it made, puts them in the
+     admin task's inbox and answers on "<topic>-<nonce>". An answer counts only with a good HMAC-SHA256 under the
+     card's reply key (link field rk, made by card.py; never sent anywhere): nobody else can show him Recorded or Done.
+     The tap itself carries no secret: it is his passkey's signature over this one card's challenge. */
+  var RELAY = "https://ntfy.sh", TOPIC = "cct-f33ede9c4af5e2bcd23b";
+  function tapUrl() { return RELAY + "/" + TOPIC; }
+  function answersUrl(nonce, since) { return RELAY + "/" + TOPIC + "-" + nonce + "/json?poll=1&since=" + since; }
+  /* ntfy's poll answer: one JSON event per line; returns the relay answers in it, unchecked: [{v,n,k,t,at,mac,id}] */
+  function answers(text) {
+    var out = [];
+    String(text).split("\n").forEach(function (ln) {
+      var e, a;
+      try { e = JSON.parse(ln); } catch (x) { return; }
+      if (!e || e.event !== "message" || typeof e.message !== "string") return;
+      try { a = JSON.parse(e.message); } catch (x) { return; }
+      if (a && typeof a === "object") { a.id = e.id; out.push(a); }
+    });
+    return out;
+  }
+  /* true only for an answer the Dell's relay signed for this card: same nonce, a known kind, good mac */
+  function answerOk(a, nonce, rk, subtle) {
+    var kinds = { recorded: 1, already: 1, expired: 1, failed: 1, done: 1 };
+    if (!a || a.v !== 1 || a.n !== nonce || !kinds[a.k] || typeof a.t !== "string" || !Number.isInteger(a.at)
+        || typeof a.mac !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(a.mac)) return Promise.resolve(false);
+    var te = new TextEncoder();
+    return subtle.importKey("raw", b64uToBytes(rk), { name: "HMAC", hash: "SHA-256" }, false, ["verify"]).then(function (k) {
+      return subtle.verify("HMAC", k, b64uToBytes(a.mac), te.encode(["cos-relay-v1", a.n, a.k, a.t, a.at].join("|")));
+    }).catch(function () { return false; });
+  }
+  return { botLink: botLink, shareLink: shareLink, tapUrl: tapUrl, answersUrl: answersUrl, answers: answers,
+           answerOk: answerOk, b64uToBytes: b64uToBytes, bytesToB64u: bytesToB64u,
            parseFragment: parseFragment, ready: ready, shortFp: shortFp, getOptions: getOptions,
            assertionJSON: assertionJSON, message: message };
 })();
@@ -155,36 +189,87 @@ if (typeof module !== "undefined") module.exports = COS;
   if (Date.now() / 1000 > o.expires) { say("This sign link has expired. Nothing was signed.", "bad"); return; }
   COS.ready(o, window.crypto && window.crypto.subtle).then(function () { $("go").disabled = false; },
     function (e) { say(e.message, "bad"); });
+  /* The way since Nov 21 2026: straight to the Dell's relay, answers on this same screen (see COS.tapUrl). */
+  function relay(m) {
+    var since = String(Math.floor(Date.now() / 1000) - 30), seen = {}, done = false, heard = false, tries = 0, steps = [];
+    $("retry").hidden = true; $("other").hidden = true;
+    say("Fingerprint done. Sending it to the Dell...", "ok");
+    fetch(COS.tapUrl(), { method: "POST", body: m, cache: "no-store" }).then(function (r) {
+      if (!r.ok) throw new Error("the relay answered " + r.status);
+      say("Sent to the Dell. Waiting for its answer, about 10 seconds. Keep this page open.", "ok");
+      poll();
+    }).catch(function (e) {
+      say("Failed: your tap could not reach the Dell's relay (" + ((e && e.message) || "no internet") + "). Nothing "
+          + "was signed or installed. Check the phone has internet, then tap Try again.", "bad");
+      $("retry").hidden = false; $("other").hidden = false;
+      $("retry").onclick = function () { relay(m); };
+    });
+    function show(a) {                               /* each step stays on screen: Recorded, then Done or Failed under it */
+      if (done) return;
+      steps.push(a.t);
+      if (a.k === "recorded" || a.k === "already") { heard = true; say(steps.join("\n"), "ok"); return; }
+      done = true; say(steps.join("\n"), a.k === "done" ? "ok" : "bad");
+    }
+    function poll() {
+      if (done) return;
+      if (Date.now() / 1000 > o.expires + 1800) {
+        say((heard ? "Recorded, but the Dell has not said Done or Failed in 30 minutes. " : "No answer from the Dell. ")
+            + "Its answer also comes in Telegram.", heard ? "ok" : "bad");
+        return;
+      }
+      tries++;
+      fetch(COS.answersUrl(o.nonce, since), { cache: "no-store" }).then(function (r) { return r.ok ? r.text() : ""; })
+        .then(function (text) {
+          return COS.answers(text).reduce(function (p, a) {
+            return p.then(function () {
+              if (seen[a.id]) return;
+              seen[a.id] = 1;
+              return COS.answerOk(a, o.nonce, o.rk, crypto.subtle).then(function (ok) { if (ok) show(a); });
+            });
+          }, Promise.resolve());
+        }).catch(function () {}).then(function () {
+          if (done) return;
+          if (!heard && tries === 12)
+            say("Sent, but no answer from the Dell yet. It answers once it is on and online. Keep this page open.", "ok");
+          setTimeout(poll, 5000);
+        });
+    }
+  }
+  /* The old way, kept as "Other way": the bot's Telegram chat (copy, paste and send). */
+  function telegram(m) {
+    $("out").hidden = false; $("send").hidden = false; $("copy").hidden = false; $("share").hidden = false;
+    say("NOT SENT YET. Tap Send to the bot: Telegram opens the cos brains chat with the message in the box, and it is "
+        + "copied too. Tap Telegram's send arrow. The bot answers within a minute. No answer means it did not arrive.", "ok");
+    function copy() {                                   /* on his clipboard too: if Telegram leaves the box empty, he pastes */
+      var ok = false;
+      try { $("out").focus(); $("out").select(); ok = document.execCommand("copy"); $("out").blur(); } catch (e) {}
+      if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(m).catch(function () {});
+      return ok;
+    }
+    $("send").onclick = function () {
+      copy();
+      say("Opening Telegram. NOT SENT until you tap its send arrow. If the box there is empty: press and hold it, "
+          + "tap Paste, then send. Then wait for the bot's answer.", "ok");
+      location.href = COS.botLink(m);
+    };
+    $("copy").onclick = function () {
+      say(copy() ? "Copied. Open the cos brains chat in Telegram, press and hold the box, tap Paste, then send."
+                 : "Copy did not work here: press and hold the text below, Select all, Copy, then paste it in the cos brains chat.", "ok");
+    };
+    $("share").onclick = function () {
+      copy();
+      say("In Telegram's list pick the cos brains bot, then send. Wait for the bot's answer.", "ok");
+      location.href = COS.shareLink(m);
+    };
+  }
   $("go").onclick = function () {
     $("go").disabled = true; say("Waiting for your fingerprint...");
     navigator.credentials.get(COS.getOptions(o)).then(function (c) {
       var m = COS.message(o.nonce, c);
-      $("out").value = m; $("out").hidden = false; $("send").hidden = false;
-      $("copy").hidden = false; $("share").hidden = false;
-      say("Fingerprint done. NOT SENT YET. Tap Send to the bot: Telegram opens the cos brains chat with the message "
-          + "in the box, and it is copied too. Tap Telegram's send arrow. The bot answers within a minute. No answer "
-          + "means it did not arrive. " + (inst ? "The install runs on the Dell." : "Signing happens on the Dell."), "ok");
-      function copy() {                                 /* on his clipboard too: if Telegram leaves the box empty, he pastes */
-        var ok = false;
-        try { $("out").focus(); $("out").select(); ok = document.execCommand("copy"); $("out").blur(); } catch (e) {}
-        if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(m).catch(function () {});
-        return ok;
-      }
-      $("send").onclick = function () {                 /* the bot's own chat, text filled in */
-        copy();
-        say("Opening Telegram. NOT SENT until you tap its send arrow. If the box there is empty: press and hold it, "
-            + "tap Paste, then send. Then wait for the bot's answer.", "ok");
-        location.href = COS.botLink(m);
-      };
-      $("copy").onclick = function () {
-        say(copy() ? "Copied. Open the cos brains chat in Telegram, press and hold the box, tap Paste, then send."
-                   : "Copy did not work here: press and hold the text below, Select all, Copy, then paste it in the cos brains chat.", "ok");
-      };
-      $("share").onclick = function () {                /* fallback: Telegram's chat list; pick the cos brains bot */
-        copy();
-        say("In Telegram's list pick the cos brains bot, then send. Wait for the bot's answer.", "ok");
-        location.href = COS.shareLink(m);
-      };
+      $("out").value = m;
+      $("other").onclick = function () { $("other").hidden = true; $("retry").hidden = true; telegram(m); };
+      if (!o.rk || !window.fetch) { telegram(m); return; }        /* a card from before the relay: Telegram only */
+      relay(m);
     }).catch(function (e) { $("go").disabled = false; say("Not signed: " + (e && e.name || "error") + ". Nothing was signed.", "bad"); });
   };
 })();
