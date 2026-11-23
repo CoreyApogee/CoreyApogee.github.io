@@ -72,6 +72,11 @@ var COS = (function () {
         || !Number.isInteger(o.expires) || !/^[A-Za-z0-9.-]{3,253}$/.test(o.rpId)
         || !/^[A-Za-z0-9_-]{43}$/.test(o.challenge) || !b.test(o.cred) || typeof o.title !== "string")
       throw new Error("this sign link has a bad value");
+    /* the release's picks (Nov 22 2026): signed in a v2 link, required there; a v1 link may carry them unsigned */
+    var pk = /^[a-z0-9][a-z0-9-]{1,40} [0-9a-f]{16}(, [a-z0-9][a-z0-9-]{1,40} [0-9a-f]{16}){0,15}$/;
+    if (("v" in o && o.v !== "cos-sign-v2") || (o.v === "cos-sign-v2" && !("picks" in o))
+        || ("picks" in o && (typeof o.picks !== "string" || !pk.test(o.picks))))
+      throw new Error("this sign link has a bad value");
     return o;
   }
   function hex(buf) {
@@ -82,12 +87,16 @@ var COS = (function () {
   /* What he reads is what he signs: for an install link the page itself recomputes the challenge from exactly the
      fields it shows (sha256("cos-install-v1|NAME|BUNDLE|sha256(WHAT)|NONCE|EXPIRES"), the Dell's formula) and refuses
      the link if it is not the challenge the link asks the passkey to sign. Release links the same (Nov 21 2026):
-     sha256("cos-sign-v1|REL|SHA|PACK|WF|PROOF|INSTALLED|NONCE|EXPIRES"); a link without those fields is refused. */
+     sha256("cos-sign-v1|REL|SHA|PACK|WF|PROOF|INSTALLED|NONCE|EXPIRES"); a link without those fields is refused.
+     A v2 release link (Nov 22 2026) signs the picks it shows too:
+     sha256("cos-sign-v2|REL|SHA|PACK|WF|PROOF|INSTALLED|PICKS|NONCE|EXPIRES"). */
   function ready(o, subtle) {
     if (!subtle) return Promise.reject(new Error("this browser cannot check the link; open it in Chrome"));
     var te = new TextEncoder();
     if (o.kind !== "install") {
-      var rs = ["cos-sign-v1", o.rel, o.sha, o.pack, o.wf, o.proof, o.installed, o.nonce, String(o.expires)].join("|");
+      var rs = (o.v === "cos-sign-v2"
+        ? ["cos-sign-v2", o.rel, o.sha, o.pack, o.wf, o.proof, o.installed, o.picks, o.nonce, String(o.expires)]
+        : ["cos-sign-v1", o.rel, o.sha, o.pack, o.wf, o.proof, o.installed, o.nonce, String(o.expires)]).join("|");
       return subtle.digest("SHA-256", te.encode(rs)).then(function (c) {
         if (bytesToB64u(c) !== o.challenge) throw new Error("this link does not match what it shows; nothing was signed");
         return o;
@@ -183,6 +192,9 @@ if (typeof module !== "undefined") module.exports = COS;
     $("h").textContent = "Sign release " + o.rel;
     $("rel").textContent = o.rel; $("sha").textContent = o.sha;
     $("title").textContent = "review pack " + o.pack.slice(0, 12);     /* signed too; the link's free title is not */
+    if (o.v === "cos-sign-v2") {                     /* the picks it was built on: signed, so shown word for word */
+      $("title").textContent += "\nbuilt on the picks: " + o.picks; $("title").style.whiteSpace = "pre-wrap";
+    }
   }
   $("exp").textContent = new Date(o.expires * 1000).toLocaleString();
   if (!window.PublicKeyCredential) { say("This browser cannot use passkeys. Open the link in Chrome.", "bad"); return; }
